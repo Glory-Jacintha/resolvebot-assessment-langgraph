@@ -68,7 +68,7 @@ def check_return(
     today: date,
     window_days: int,
 ) -> Optional[dict[str, Any]]:
-    """Checks 1 (delivered), 2, 3 and 4 from the task, in order.
+    """Checks 1 (delivered), 2, 3 and 4 from the spec, in order.
 
     ``items`` are the selected order items: dicts with item_id, name,
     returnable (yes / unopened_only / no) and opened (truthy if opened).

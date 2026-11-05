@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 from starlette.concurrency import run_in_threadpool
 
 from agent import Agent, SessionOwnerError
@@ -18,12 +19,42 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="ResolveBot")
 agent = Agent()
 
+# Swagger only: adds an "Authorize" button where the customer ID is entered once and then sent as the
+# X-Customer-Id header with every request, so the request forms show only the body fields.
+# The handlers below still read and check the header by hand (auto_error=False),
+# so the status codes stay 400 / 401 / 403.
+_customer_header = APIKeyHeader(
+    name="X-Customer-Id",
+    auto_error=False,
+    description="The logged-in customer, for example C1001. Missing or unknown -> 401.",
+)
+
+# Swagger only: the body shown for POST /chat (parsing is still done by hand below).
+_CHAT_DOCS = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "message": {"type": "string"},
+                    },
+                    "required": ["session_id", "message"],
+                },
+                "example": {"session_id": "s1", "message": "Hi, what can you help me with?"},
+            }
+        },
+    },
+}
+
 
 def _error(status: int, detail: str) -> JSONResponse:
     return JSONResponse({"detail": detail}, status_code=status)
 
 
-@app.post("/chat")
+@app.post("/chat", openapi_extra=_CHAT_DOCS, dependencies=[Depends(_customer_header)])
 async def chat(request: Request) -> JSONResponse:
     # 401: the customer ID header must be present and known.
     customer_id = (request.headers.get("x-customer-id") or "").strip()
@@ -48,3 +79,4 @@ async def chat(request: Request) -> JSONResponse:
     except SessionOwnerError:
         return _error(403, "This session belongs to another customer")
     return JSONResponse(reply)
+

@@ -239,7 +239,7 @@ class Agent:
             self._after_agent,
             {"tools": "tools", "finalize": "finalize", "too_many": "too_many", "fail": "fail"},
         )
-        g.add_edge("tools", "agent")
+        g.add_conditional_edges("tools", self._after_tools, {"agent": "agent", "finalize": "finalize"})
         for node in ("confirm", "finalize", "too_many", "fail"):
             g.add_edge(node, END)
         return g.compile(checkpointer=checkpointer)
@@ -262,6 +262,11 @@ class Agent:
         if state.get("tool_count", 0) + len(calls) > get_settings().max_tool_calls:
             return "too_many"
         return "tools"
+
+    @staticmethod
+    def _after_tools(state: ChatState) -> str:
+        """An order that is missing or not the customer's has a fixed reply: no more LLM calls."""
+        return "finalize" if state.get("order_not_found") else "agent"
 
     # ---- nodes
     @staticmethod
