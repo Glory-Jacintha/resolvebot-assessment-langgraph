@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -43,6 +44,7 @@ from prompts import build_system_prompt
 from tools import ORDER_NOT_FOUND_REPLY, WRITE_TOOLS, ToolContext
 
 log = logging.getLogger("resolvebot.agent")
+_debug: dict = {"error": None}  # last LLM error, shown in the reply only when DEBUG_ERRORS=1
 
 ROUTES = ("answer", "clarify", "no_answer", "out_of_scope")
 MAX_HISTORY = 40  # messages kept per chat
@@ -201,8 +203,12 @@ class Agent:
         }
         with lock:
             try:
+                _debug["error"] = None
                 result = self._graph.invoke(turn_input, config)
-                return result["reply"] or _reply(FALLBACK_REPLY)
+                reply = result["reply"] or _reply(FALLBACK_REPLY)
+                if os.getenv("DEBUG_ERRORS") == "1" and _debug["error"]:  # temporary: show the real error
+                    reply = {**reply, "debug_error": _debug["error"]}
+                return reply
             except Exception:
                 log.exception("chat failed")
                 self._repair(config)
@@ -308,8 +314,11 @@ class Agent:
         try:
             system = SystemMessage(content=build_system_prompt(settings.app_today))
             return {"messages": [self._get_llm().invoke([system] + list(state["messages"]))]}
-        except Exception:
+        except Exception as exc:
             log.exception("LLM call failed")
+            cause = exc.__cause__
+            detail = getattr(cause, "body", None) or getattr(getattr(cause, "response", None), "text", "")
+            _debug["error"] = f"{type(exc).__name__}: {str(exc)[:500]} | {str(detail)[:1500]}"
             return {"failed": True}
 
     def _tools(self, state: ChatState) -> dict[str, Any]:

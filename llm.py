@@ -7,8 +7,11 @@ The agent only needs one method: ``llm.invoke(list_of_messages) -> AIMessage``.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from config import get_settings
 from tools import TOOL_SPECS
@@ -16,14 +19,39 @@ from tools import TOOL_SPECS
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
+def flatten_tool_history(messages: list[Any]) -> list[Any]:
+    """Gemini answers 400 when replayed tool-call messages are sent back to it: send them as plain text."""
+    out: list[Any] = []
+    called: dict[str, str] = {}
+    for m in messages:
+        if isinstance(m, AIMessage) and m.tool_calls:
+            for tc in m.tool_calls:
+                called[tc["id"]] = tc["name"]
+            calls = "; ".join(f'{tc["name"]}({json.dumps(tc["args"])})' for tc in m.tool_calls)
+            text = m.content if isinstance(m.content, str) else ""
+            out.append(AIMessage(content=(text + "\n" if text else "") + f"(tool request: {calls})"))
+        elif isinstance(m, ToolMessage):
+            piece = f"Result of {called.get(m.tool_call_id, 'tool')}: {m.content}"
+            if out and isinstance(out[-1], HumanMessage) and str(out[-1].content).startswith("Tool results:"):
+                out[-1] = HumanMessage(content=str(out[-1].content) + "\n" + piece)
+            else:
+                out.append(HumanMessage(content="Tool results:\n" + piece))
+        else:
+            out.append(m)
+    return out
+
+
 class _TemperatureFallback:
     """Some newer models reject a temperature setting: retry once without it."""
 
-    def __init__(self, build):
+    def __init__(self, build, flatten: bool = False):
         self._build = build
+        self._flatten = flatten  # Gemini only: see flatten_tool_history
         self._model = build(True)
 
     def invoke(self, messages: list[Any]) -> Any:
+        if self._flatten:
+            messages = flatten_tool_history(messages)
         try:
             return self._model.invoke(messages)
         except Exception as exc:
@@ -75,7 +103,7 @@ def create_llm() -> _TemperatureFallback:
     else:
         raise RuntimeError(f"Unknown LLM_PROVIDER {provider!r} (use anthropic, openai or gemini)")
 
-    return _TemperatureFallback(build)
+    return _TemperatureFallback(build, flatten=(provider == "gemini"))
 
 
 def _lc_tools() -> list[dict[str, Any]]:
