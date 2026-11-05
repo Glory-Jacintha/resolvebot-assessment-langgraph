@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover
 DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-5-5",
     "openai": "gpt-4o",
-    "gemini": "gemini-3.6-flash",
+    "gemini": "gemini-3.5-flash-lite",
 }
 
 

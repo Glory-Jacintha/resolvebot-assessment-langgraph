@@ -20,24 +20,36 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
 def flatten_tool_history(messages: list[Any]) -> list[Any]:
-    """Gemini answers 400 when replayed tool-call messages are sent back to it: send them as plain text."""
+    """Gemini answers 400 when replayed tool-call messages are sent back to it. Instead, the tools already run
+    for this customer message are shown as ONE note on the user side (no assistant text for the model to imitate)."""
     out: list[Any] = []
-    called: dict[str, str] = {}
+    calls: dict[str, str] = {}
+    results: list[str] = []
+
+    def flush() -> None:
+        if results:
+            out.append(
+                HumanMessage(
+                    content=(
+                        "[Tools already run for the customer's message above. These results are final; do not "
+                        "repeat a tool with the same arguments.]\n"
+                        + "\n".join(results)
+                        + "\n[Now continue: call the next tool if one is still needed, or give your final reply.]"
+                    )
+                )
+            )
+            results.clear()
+
     for m in messages:
         if isinstance(m, AIMessage) and m.tool_calls:
             for tc in m.tool_calls:
-                called[tc["id"]] = tc["name"]
-            calls = "; ".join(f'{tc["name"]}({json.dumps(tc["args"])})' for tc in m.tool_calls)
-            text = m.content if isinstance(m.content, str) else ""
-            out.append(AIMessage(content=(text + "\n" if text else "") + f"(tool request: {calls})"))
+                calls[tc["id"]] = f'{tc["name"]}({json.dumps(tc["args"], ensure_ascii=False)})'
         elif isinstance(m, ToolMessage):
-            piece = f"Result of {called.get(m.tool_call_id, 'tool')}: {m.content}"
-            if out and isinstance(out[-1], HumanMessage) and str(out[-1].content).startswith("Tool results:"):
-                out[-1] = HumanMessage(content=str(out[-1].content) + "\n" + piece)
-            else:
-                out.append(HumanMessage(content="Tool results:\n" + piece))
+            results.append(f"- {calls.get(m.tool_call_id, m.name or 'tool')} returned: {m.content}")
         else:
+            flush()
             out.append(m)
+    flush()
     return out
 
 

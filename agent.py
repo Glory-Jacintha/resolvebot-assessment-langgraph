@@ -288,32 +288,78 @@ class Agent:
         entry = {"name": name, "args": args, "status": "error" if failed else "success"}
 
         if failed:
-            answer = f"Sorry, I couldn't save that, so nothing was changed. {result.get('message', '')}".strip()
+            default = f"Sorry, I couldn't save that, so nothing was changed. {result.get('message', '')}".strip()
         elif name == "create_return_request":
             names = ", ".join(i["name"] for i in result["items"])
-            answer = (
+            default = (
                 f"Done. Your return request {result['request_id']} for {names} "
                 f"(order {result['order_id']}) has been created."
             )
         else:
             kind = "cancellation" if result["ticket_type"] == "cancellation" else "warranty"
-            answer = (
+            default = (
                 f"Done. I've opened {kind} ticket {result['ticket_id']} for order {result['order_id']}. "
                 "Our team will follow up."
             )
+        answer = self._phrase_outcome(name, result, failed, default)
         return {
             "pending": None,
             "reply": _reply(answer, "answer", tool_calls=[entry]),
             "messages": _tidy(state["messages"], answer),
         }
 
+    def _phrase_outcome(self, name: str, result: dict[str, Any], failed: bool, default: str) -> str:
+        """Let the LLM word the outcome of a confirmed action. Python already did the save and knows if it
+        worked; the model only gets those facts. If it fails, or leaves out the ID, the fixed text is used."""
+        try:
+            system = SystemMessage(
+                content=(
+                    "You are ResolveBot, ShopSphere's customer support assistant. The customer said yes to an "
+                    "action and our system has already carried it out (or refused it). Tell the customer the "
+                    "outcome in 1 to 3 warm, plain-text sentences. Use ONLY the facts you are given: never invent "
+                    "dates, amounts or promises. If it was saved, mention what was done (the item names or the "
+                    "ticket type), the order ID, and the request or ticket ID exactly as given. If it failed, say "
+                    "that nothing was changed and explain the reason from the message. Do not call tools. Plain "
+                    "text only, no JSON, no markdown."
+                )
+            )
+            facts = {"outcome": "failed, nothing was saved" if failed else "saved", "action": name, "details": result}
+            msg = self._get_llm().invoke([system, HumanMessage(content=json.dumps(facts, ensure_ascii=False, default=str))])
+            text = _text(msg).strip()
+            if text.startswith("{"):
+                text = str(parse_final(text).get("answer") or "").strip()
+            key = str(result.get("request_id") or result.get("ticket_id") or "")
+            if not text or getattr(msg, "tool_calls", None) or (not failed and key not in text):
+                return default
+            return text
+        except Exception:
+            log.exception("could not word the outcome with the LLM; using the fixed text")
+            return default
+
     def _agent(self, state: ChatState) -> dict[str, Any]:
         settings = get_settings()
-        if time.monotonic() - state["started"] > settings.reply_time_budget:
+        elapsed = time.monotonic() - state["started"]
+        if elapsed > settings.reply_time_budget:
+            log.warning("time budget used up (%.1fs so far): giving the fallback reply", elapsed)
+            _debug["error"] = f"time budget used up after {elapsed:.1f}s (REPLY_TIME_BUDGET_SECONDS)"
             return {"failed": True}
         try:
             system = SystemMessage(content=build_system_prompt(settings.app_today))
-            return {"messages": [self._get_llm().invoke([system] + list(state["messages"]))]}
+            history = [system] + list(state["messages"])
+            began = time.monotonic()
+            msg = self._get_llm().invoke(history)
+            text = _text(msg).strip()
+            wrote_a_call = bool(re.search(r"\b(?:get_orders|search_policy|check_return_eligibility|create_return_request|create_support_ticket)\s*\(", text))
+            if not getattr(msg, "tool_calls", None) and (not text or wrote_a_call):
+                log.warning("LLM gave an empty reply or wrote a tool call as text: asking once more")
+                nudge = HumanMessage(
+                    content="Use the real tool-calling mechanism if you need a tool. Otherwise reply to the "
+                    "customer with the JSON object only."
+                )
+                msg = self._get_llm().invoke(history + [nudge])
+            log.info("LLM step took %.1fs, tool calls: %s", time.monotonic() - began,
+                     [c["name"] for c in (getattr(msg, "tool_calls", None) or [])])
+            return {"messages": [msg]}
         except Exception as exc:
             log.exception("LLM call failed")
             cause = exc.__cause__
@@ -385,8 +431,13 @@ class Agent:
         if state.get("order_not_found"):
             reply = _reply(ORDER_NOT_FOUND_REPLY, "no_answer", tool_calls=log_entries)
         else:
-            data = parse_final(_text(state["messages"][-1]))
-            answer = str(data.get("answer") or "").strip() or FALLBACK_REPLY
+            raw = _text(state["messages"][-1])
+            data = parse_final(raw)
+            answer = str(data.get("answer") or "").strip()
+            if not answer:
+                log.warning("final reply had no answer; raw LLM text: %r", raw[:800])
+                _debug["error"] = f"empty answer; raw LLM text: {raw[:800]!r}"
+                answer = FALLBACK_REPLY
             route = data.get("route") if data.get("route") in ROUTES else "answer"
             pending = state.get("pending")
 
